@@ -1,0 +1,23 @@
+# 忽略 Python 快取
+__pycache__/
+src/__pycache__/
+*.pyc
+
+# 忽略模型權重 (最重要！mit_b5 的權重檔一定很大)
+checkpoints/
+*.pth
+*.pt
+*.ckpt
+
+# 忽略數據集
+data/
+
+# 忽略訓練紀錄
+logs/
+nohup_train.out
+
+# 忽略生成的提交結果 (CSV通常是跑出來的，不需要版本控制)
+submissions/
+
+# 系統檔案
+.DS_Store

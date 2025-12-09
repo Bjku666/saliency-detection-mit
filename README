@@ -1,0 +1,38 @@
+nohup python train.py --backbone mit_b5 --gpu_id 0 > train_log.out 2>&1 &```
+*   **`nohup ... &`**: 确保命令在后台持续运行。
+*   **`--backbone mit_b5 --gpu_id 0`**: 告诉脚本使用 `mit_b5` 模型，并在第一张显卡 (GPU 0) 上训练。
+*   **`> train_log.out 2>&1`**: 将所有训练日志（包括进度条和报错信息）都保存到 `train_log.out` 文件中。
+
+**3. 如何监控**
+*   **实时看日志**: `tail -f train_log.out`
+*   **看 TensorBoard**:
+    ```bash
+    # 在服务器启动
+    tensorboard --logdir=./logs --port 6006 --bind_all
+    # 在本地浏览器访问 http://localhost:6006 (需保持SSH隧道)
+    ```
+
+---
+
+### Phase 2: 本地快速评估 (获取最终分数)
+
+当训练停止后（无论是跑完了所有 epochs 还是 early stopping 触发了），`checkpoints` 文件夹里就会生成一个 `best_model.pth`。现在我们来评估它的最终性能。
+
+**1. 找到权重路径**
+*   你的最佳权重路径应该类似：`./checkpoints/mit_b5_1205_2210/best_model.pth`。
+*   请用 `ls -R checkpoints` 命令找到这个**确切的路径**。
+
+**2. 运行评估命令**
+```bash
+python evaluate.py --backbone mit_b5 --ckpt_path ./checkpoints/mit_b5_1205_2210/best_model.pth
+
+Phase 3: 生成最终提交文件
+评估完分数，确认结果满意后，我们来生成符合比赛提交格式的 CSV 文件。
+1. 找到权重路径 (同上一步)
+确保你的权重路径是正确的。
+2. 运行生成命令
+code
+Bash
+python inference.py --backbone mit_b5 --ckpt_path ./checkpoints/mit_b5_1205_2210/best_model.pth
+这个命令的参数和 evaluate.py 完全一样。
+3. 你会得到什么
