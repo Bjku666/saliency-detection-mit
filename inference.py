@@ -74,10 +74,10 @@ def run_inference(args):
     models = []
     for fold_idx in folds:
         # 新结构：checkpoints/<exp_name>/foldX/best_model.pth
-        ckpt_path = os.path.join(cfg.checkpoints_root, exp_name, f"fold{fold_idx}", "best_model.pth")
+        ckpt_path = os.path.join(cfg.checkpoints_root, exp_name, f"fold{fold_idx}", args.model_file)
         # 兼容旧结构：checkpoints/<exp_name>_foldX/best_model.pth
         if not os.path.exists(ckpt_path):
-            legacy = os.path.join(cfg.checkpoints_root, f"{exp_name}_fold{fold_idx}", "best_model.pth")
+            legacy = os.path.join(cfg.checkpoints_root, f"{exp_name}_fold{fold_idx}", args.model_file)
             if os.path.exists(legacy):
                 ckpt_path = legacy
             else:
@@ -151,6 +151,7 @@ def parse_args():
     parser.add_argument('--exp_name', type=str, default=None, help='Base experiment name without fold suffix')
     parser.add_argument('--folds', type=str, default=None, help='Comma-separated fold indices, e.g., "0" or "0,1,2,3,4"')
     parser.add_argument('--save_name', type=str, default=None, help='Optional output csv name')
+    parser.add_argument('--model_file', type=str, default='best_model.pth', help='Model filename to load (e.g., best_model_swa.pth)')
     return parser.parse_args()
 
 
