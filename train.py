@@ -1,6 +1,8 @@
 import torch
 from tqdm import tqdm
 import os
+from torch.optim import swa_utils
+import torchvision.utils as vutils
 
 from config import cfg
 from src.dataset import get_dataloaders
@@ -22,6 +24,46 @@ class EarlyStopping:
         else:
             self.counter += 1
             return self.counter >= self.patience # Stop training
+
+
+def compute_loss_components(criterion, pred_logits, target):
+    """返回总损失、分项损失字典，以及 Sigmoid 后的概率图"""
+    pred_probs = torch.sigmoid(pred_logits)
+    weights = getattr(criterion, "weights", {})
+
+    losses = {}
+    total = pred_logits.new_tensor(0.0)
+
+    if weights.get("cc", 0) > 0:
+        cc_val = (1.0 - criterion.cc_metric(pred_probs, target)).mean()
+        losses["cc"] = cc_val
+        total = total + weights["cc"] * cc_val
+
+    if weights.get("kld", 0) > 0:
+        kld_val = criterion.kld_loss(pred_probs, target).mean()
+        losses["kld"] = kld_val
+        total = total + weights["kld"] * kld_val
+
+    if weights.get("bce", 0) > 0:
+        bce_val = criterion.bce(pred_logits, target)
+        losses["bce"] = bce_val
+        total = total + weights["bce"] * bce_val
+
+    if weights.get("ssim", 0) > 0:
+        ssim_val = 1.0 - criterion.ssim(pred_probs, target)
+        losses["ssim"] = ssim_val
+        total = total + weights["ssim"] * ssim_val
+
+    losses["total"] = total
+    return total, losses, pred_probs
+
+
+def denormalize(imgs, mean, std):
+    """反归一化 Tensor 图像 (N, C, H, W)"""
+    device = imgs.device
+    mean_t = torch.tensor(mean, device=device).view(1, -1, 1, 1)
+    std_t = torch.tensor(std, device=device).view(1, -1, 1, 1)
+    return imgs * std_t + mean_t
 
 def main():
     cfg.parse_args()
@@ -45,9 +87,17 @@ def main():
         logger.info(f"Detected {num_gpus} GPUs — using DataParallel")
     else:
         logger.info(f"Using device: {device}")
+
+    base_model = model.module if isinstance(model, torch.nn.DataParallel) else model
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     criterion = SaliencyLoss(cfg)
+
+    # SWA: start averaging in the final 25% epochs
+    swa_start_epoch = int(cfg.epochs * 0.75)
+    swa_model = swa_utils.AveragedModel(base_model).to(device)
+    swa_scheduler = None
+    swa_updates = 0
     
     warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda epoch: (epoch + 1) / cfg.warmup_epochs if epoch < cfg.warmup_epochs else 1)
     cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs - cfg.warmup_epochs, eta_min=1e-6)
@@ -78,18 +128,38 @@ def main():
         for epoch in range(cfg.epochs):
             model.train()
             loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{cfg.epochs}")
+            train_loss_accum = {}
             for imgs, masks in loop:
                 imgs, masks = imgs.to(device), masks.to(device)
                 optimizer.zero_grad()
                 preds = model(imgs)
-                loss = criterion(preds, masks)
+                loss, loss_dict, _ = compute_loss_components(criterion, preds, masks)
                 loss.backward()
                 optimizer.step()
+                # 累计分项损失
+                for k, v in loss_dict.items():
+                    train_loss_accum[k] = train_loss_accum.get(k, 0.0) + v.item()
                 loop.set_postfix(loss=loss.item())
+
+            # 记录训练阶段标量（按 epoch 平均）
+            num_train_batches = len(train_loader)
+            train_log = {f"loss/{k}": v / num_train_batches for k, v in train_loss_accum.items()}
+            train_log["lr"] = optimizer.param_groups[0]['lr']
+            logger.log_metrics(train_log, epoch, 'train')
+
+            # SWA 开启与权重累计（最后 25% 的 epoch）
+            if epoch >= swa_start_epoch:
+                if swa_scheduler is None:
+                    swa_scheduler = swa_utils.SWALR(optimizer, swa_lr=optimizer.param_groups[0]['lr'])
+                    logger.info(f"SWA activated at epoch {epoch+1}")
+                swa_model.update_parameters(base_model)
+                swa_updates += 1
 
             # step schedulers: warmup first then cosine
             try:
-                if epoch < cfg.warmup_epochs:
+                if swa_scheduler is not None:
+                    swa_scheduler.step()
+                elif epoch < cfg.warmup_epochs:
                     warmup_scheduler.step()
                 else:
                     cosine_scheduler.step()
@@ -101,39 +171,67 @@ def main():
             model.eval()
             val_cc_sum = 0
             val_loss_sum = 0
+            val_loss_accum = {}
+            viz_batch = None
             
             with torch.no_grad():
                 for imgs, masks in val_loader:
                     imgs, masks = imgs.to(device), masks.to(device)
-                    
-                    # 1. 模型输出 Logits
                     preds_logits = model(imgs)
-                    
-                    # 2. 计算 Loss (Criterion 内部会自动处理 Logits -> Sigmoid)
-                    loss = criterion(preds_logits, masks)
+                    loss, loss_dict, preds_probs = compute_loss_components(criterion, preds_logits, masks)
                     val_loss_sum += loss.item()
+                    for k, v in loss_dict.items():
+                        val_loss_accum[k] = val_loss_accum.get(k, 0.0) + v.item()
 
-                    # 3. ⚠️ 关键修改：手动 Sigmoid 转成 [0,1] 概率图
-                    preds_probs = torch.sigmoid(preds_logits)
-
-                    # 4. 计算 CC 指标 (使用 0-1 的图)
-                    # 复用 criterion.cc_metric, 它返回的是一个 batch 的 CC 列表
-                    # 我们只需要把它们加起来
                     batch_cc_list = criterion.cc_metric(preds_probs, masks)
                     val_cc_sum += batch_cc_list.sum().item()
+
+                    # 保存第一批用于可视化
+                    if viz_batch is None:
+                        viz_batch = {
+                            "imgs": imgs.detach().clone(),
+                            "masks": masks.detach().clone(),
+                            "preds": preds_probs.detach().clone(),
+                            "logits": preds_logits.detach().clone(),
+                        }
 
             avg_val_loss = val_loss_sum / len(val_loader)
             avg_val_cc = val_cc_sum / len(val_loader.dataset)
             
             logger.info(f"Epoch {epoch+1} | Val Loss: {avg_val_loss:.4f} | Val CC: {avg_val_cc:.4f}")
-            logger.log_metrics({'val_loss': avg_val_loss, 'val_cc': avg_val_cc}, epoch, 'epoch')
+            num_val_batches = len(val_loader)
+            val_log = {f"loss/{k}": v / num_val_batches for k, v in val_loss_accum.items()}
+            val_log.update({"val_loss": avg_val_loss, "val_cc": avg_val_cc, "lr": optimizer.param_groups[0]['lr']})
+            logger.log_metrics(val_log, epoch, 'val')
+
+            # 记录预测直方图
+            if viz_batch is not None:
+                logger.log_histogram("preds/val_logits", viz_batch["logits"].cpu(), epoch)
+
+                # 可视化：原图 | GT | Pred
+                mean = [0.485, 0.456, 0.406]
+                std = [0.229, 0.224, 0.225]
+                imgs_viz = denormalize(viz_batch["imgs"], mean, std)
+                masks_viz = viz_batch["masks"]
+                preds_viz = viz_batch["preds"]
+
+                num_show = min(4, imgs_viz.size(0))
+                triplets = []
+                for i in range(num_show):
+                    img = imgs_viz[i].clamp(0, 1)
+                    gt_rgb = masks_viz[i].repeat(3, 1, 1).clamp(0, 1)
+                    pred_rgb = preds_viz[i].repeat(3, 1, 1).clamp(0, 1)
+                    triplets.append(torch.cat([img, gt_rgb, pred_rgb], dim=2))
+
+                grid = vutils.make_grid(torch.stack(triplets), nrow=1)
+                logger.log_image("val/visualization", grid.cpu(), epoch)
 
             # --- Checkpoint 保存逻辑 ---
             # 每个 epoch 都保存一个包含优化器状态的 checkpoint（覆盖或按 epoch 命名）
             ckpt_path = os.path.join(cfg.ckpt_dir, f"checkpoint_epoch{epoch+1}.pth")
             state = {
                 'epoch': epoch + 1,
-                'model_state': model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict(),
+                'model_state': base_model.state_dict(),
                 'optimizer_state': optimizer.state_dict(),
                 'lr': optimizer.param_groups[0]['lr'],
                 'val_cc': avg_val_cc,
@@ -153,6 +251,41 @@ def main():
             if early_stopper.step(avg_val_cc):
                 logger.info(f"Early stopping triggered at epoch {epoch+1}")
                 break
+        # 训练结束后处理 SWA（若已启用）
+        if swa_updates > 0:
+            logger.info("Updating BatchNorm statistics for SWA model")
+            swa_utils.update_bn(train_loader, swa_model, device=device)
+
+            # 评估 SWA 模型表现
+            swa_model.eval()
+            swa_val_cc_sum, swa_val_loss_sum = 0.0, 0.0
+            with torch.no_grad():
+                for imgs, masks in val_loader:
+                    imgs, masks = imgs.to(device), masks.to(device)
+                    preds_logits = swa_model(imgs)
+                    loss = criterion(preds_logits, masks)
+                    swa_val_loss_sum += loss.item()
+                    preds_probs = torch.sigmoid(preds_logits)
+                    batch_cc_list = criterion.cc_metric(preds_probs, masks)
+                    swa_val_cc_sum += batch_cc_list.sum().item()
+
+            swa_avg_val_loss = swa_val_loss_sum / len(val_loader)
+            swa_avg_val_cc = swa_val_cc_sum / len(val_loader.dataset)
+            logger.info(f"SWA Eval | Val Loss: {swa_avg_val_loss:.4f} | Val CC: {swa_avg_val_cc:.4f}")
+
+            swa_state = {
+                'epoch': epoch + 1,
+                'model_state': swa_model.state_dict(),
+                'optimizer_state': optimizer.state_dict(),
+                'val_cc': swa_avg_val_cc,
+                'val_loss': swa_avg_val_loss,
+            }
+            swa_path = os.path.join(cfg.ckpt_dir, "best_model_swa.pth")
+            torch.save(swa_state, swa_path)
+            logger.info(f"SWA model saved to: {swa_path}")
+        else:
+            logger.info("SWA not activated; skipped SWA checkpoint")
+
     except KeyboardInterrupt:
         logger.info('KeyboardInterrupt received — saving interrupt checkpoint')
         # 保存中断时的 checkpoint
@@ -160,7 +293,7 @@ def main():
             interrupt_path = os.path.join(cfg.ckpt_dir, f'interrupt_epoch{epoch+1}.pth')
             state = {
                 'epoch': epoch + 1,
-                'model_state': model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict(),
+                'model_state': base_model.state_dict(),
                 'optimizer_state': optimizer.state_dict(),
                 'val_cc': best_cc_score,
             }

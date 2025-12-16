@@ -30,16 +30,16 @@ class Config:
         self.loss_weights = {
             "cc": 1.0,    # 主要目标
             "bce": 0.0,   # 像素对齐
-            "ssim": 0.0   # 结构对齐
+            "ssim": 0.5   # 结构对齐
         }
 
         # --- 模型特定预设 ---
         self.model_presets = {
             "mit_b5": {
                 "batch_size":16,     # 4090上跑512x512的稳定值
-                "lr": 8e-5,          # Transformer 适合较小的学习率
+                "lr": 5e-5,          # Transformer 适合较小的学习率
                 "weight_decay": 0.01,
-                "warmup_epochs": 2   # 启动时预热3个epoch
+                "warmup_epochs": 3   # 启动时预热3个epoch
             }
         }
         

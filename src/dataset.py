@@ -11,18 +11,19 @@ from albumentations.pytorch import ToTensorV2
 
 def build_transforms(cfg, mode="train"):
     if mode == "train" and cfg.use_augmentation:
-        # 强力数据增强策略
         return A.Compose([
+            # 1. 强制调整到 512x512 (不缩放，不剪裁，保证内容完整)
             A.Resize(cfg.img_size, cfg.img_size),
+            
+            # 2. 唯一保留的安全增强：水平翻转
             A.HorizontalFlip(p=0.5),
-            A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=15, p=0.5),
-            A.RandomBrightnessContrast(p=0.3),
-            A.GaussNoise(p=0.2),
-            #A.CoarseDropout(max_holes=8, max_height=int(cfg.img_size*0.1), max_width=int(cfg.img_size*0.1), p=0.3),
+            
+            # 3. 标准化
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2(),
         ])
-    else: # 验证集或不使用增强的训练集
+    else:
+        # 验证集保持不变
         return A.Compose([
             A.Resize(cfg.img_size, cfg.img_size),
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),

@@ -14,27 +14,54 @@ from config import cfg
 from src.models import build_model
 from src.metric import calc_cc_score
 
+def _load_model_weights(model, state):
+    """
+    智能加载权重：
+    1. 自动识别嵌套字典 (model_state, state_dict 等)
+    2. 自动去除 DataParallel 产生的 'module.' 前缀
+    3. 支持 strict=False 加载 (针对 SWA 模型多余 buffer 的情况)
+    """
+    # 1. 尝试提取真正的权重字典
+    weights = state
+    raw_key = "direct"
+    if isinstance(state, dict):
+        for key in ['model_state', 'state_dict', 'model', 'model_state_dict']:
+            if key in state:
+                weights = state[key]
+                raw_key = key
+                break
+    
+    # 2. 去除 'module.' 前缀 (DataParallel 遗留问题)
+    new_weights = {}
+    for k, v in weights.items():
+        name = k[7:] if k.startswith('module.') else k
+        new_weights[name] = v
+    
+    # 3. 尝试加载
+    try:
+        model.load_state_dict(new_weights, strict=True)
+        return f"{raw_key} (strict=True)"
+    except RuntimeError as e:
+        # 如果严格加载失败（常见于 SWA 模型有一些额外的统计 buffer），尝试非严格加载
+        print(f"Warning: Strict loading failed ({e}). Retrying with strict=False...")
+        keys = model.load_state_dict(new_weights, strict=False)
+        return f"{raw_key} (strict=False, missing={len(keys.missing_keys)}, unexpected={len(keys.unexpected_keys)})"
+
 def evaluate_model(args):
-    """
-    加载指定模型权重，对测试集进行推理，并计算平均 CC 分数。
-    """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    # 1. 加载模型 (与 inference.py 相同)
+    # 1. 加载模型
     model = build_model(args.backbone).to(device)
     if not os.path.exists(args.ckpt_path):
         raise FileNotFoundError(f"Checkpoint not found at: {args.ckpt_path}")
+    
+    print(f"Loading checkpoint from: {args.ckpt_path}")
     state = torch.load(args.ckpt_path, map_location=device)
-    # 支持两种 checkpoint 格式：
-    # 1) 直接保存的 model state_dict
-    # 2) 包含元信息的 checkpoint dict（含 'model_state' 键）
-    if isinstance(state, dict) and 'model_state' in state:
-        model.load_state_dict(state['model_state'])
-    else:
-        model.load_state_dict(state)
+    
+    load_info = _load_model_weights(model, state)
     model.eval()
-    print(f"Model '{args.backbone}' loaded successfully from '{args.ckpt_path}'")
+    print(f"Model loaded successfully! Mode: {load_info}")
 
     # 2. 准备数据预处理
     transform = A.Compose([
@@ -49,7 +76,6 @@ def evaluate_model(args):
     
     print("\nStarting evaluation on the test set...")
     
-    # 自动查找所有测试图片
     image_paths = sorted([
         os.path.join(dp, f) 
         for dp, dn, fn in os.walk(os.path.expanduser(test_stimuli_dir)) 
@@ -60,37 +86,35 @@ def evaluate_model(args):
         raise FileNotFoundError(f"No test images found in {test_stimuli_dir}")
 
     for img_path in tqdm(image_paths, desc="Evaluating"):
-        # --- 读取图片和真值 ---
         image = cv2.imread(img_path)
         h, w = image.shape[:2]
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         
         gt_path = img_path.replace("Stimuli", "FIXATIONMAPS")
         if not os.path.exists(gt_path):
-            print(f"Warning: Ground truth not found for {img_path}, skipping.")
+            # print(f"Warning: Ground truth not found for {img_path}, skipping.")
             continue
         gt_map = cv2.imread(gt_path, cv2.IMREAD_GRAYSCALE).astype('float32') / 255.0
 
-        # --- TTA 推理 (原图 + 水平翻转) ---
+        # TTA 推理
         images_tta = [image_rgb, cv2.flip(image_rgb, 1)]
         preds_tta = []
         
         with torch.no_grad():
             for img_aug in images_tta:
                 img_tensor = transform(image=img_aug)['image'].unsqueeze(0).to(device)
+                # Sigmoid 处理
                 pred = torch.sigmoid(model(img_tensor)).squeeze().cpu().numpy()
                 preds_tta.append(pred)
         
-        # --- 融合 TTA 结果 ---
         pred_hflip_restored = cv2.flip(preds_tta[1], 1)
         final_pred_small = np.mean([preds_tta[0], pred_hflip_restored], axis=0)
         
-        # --- 后处理并计算分数 ---
         pred_resized = cv2.resize(final_pred_small, (w, h))
         score = calc_cc_score(gt_map, pred_resized)
         all_scores.append(score)
 
-    # 4. 打印最终结果
+    # 4. 打印结果
     mean_cc = np.mean(all_scores)
     std_cc = np.std(all_scores)
     
@@ -110,18 +134,16 @@ if __name__ == "__main__":
                         help="The model architecture backbone. If omitted, will use value from config.py")
     group = parser.add_mutually_exclusive_group(required=False)
     group.add_argument('--ckpt_path', type=str, 
-                        help="Path to the trained model checkpoint (.pth file). If provided, used directly.")
+                        help="Path to the trained model checkpoint (.pth file).")
     group.add_argument('--exp_name', type=str,
-                        help="Experiment name under ./checkpoints to use its best model (uses ./checkpoints/<exp_name>/best_model.pth)")
-    parser.add_argument('--list', action='store_true', help='List available experiments under ./checkpoints and exit')
+                        help="Experiment name under ./checkpoints")
+    parser.add_argument('--list', action='store_true', help='List available experiments')
     
     args = parser.parse_args()
 
-    # If backbone not provided via CLI, fallback to cfg
     if not args.backbone:
         args.backbone = cfg.backbone
 
-    # If requested, list available experiments and exit
     if args.list:
         if os.path.exists('checkpoints'):
             for d in sorted(os.listdir('checkpoints')):
@@ -130,7 +152,6 @@ if __name__ == "__main__":
             print('No checkpoints directory found.')
         exit(0)
 
-    # Resolve ckpt_path: CLI > cfg.eval_ckpt_path > cfg.eval_exp_name
     if not args.ckpt_path and not args.exp_name:
         if cfg.eval_ckpt_path:
             args.ckpt_path = cfg.eval_ckpt_path
@@ -139,15 +160,22 @@ if __name__ == "__main__":
             if os.path.exists(candidate):
                 args.ckpt_path = candidate
             else:
-                raise FileNotFoundError(f"Configured eval_exp_name '{cfg.eval_exp_name}' has no best_model at: {candidate}")
+                raise FileNotFoundError(f"No best_model at: {candidate}")
         else:
-            raise ValueError('No checkpoint specified. Provide --ckpt_path/--exp_name or set cfg.eval_ckpt_path / cfg.eval_exp_name in config.py')
+            raise ValueError('No checkpoint specified. Provide --ckpt_path or --exp_name')
 
-    # If exp_name provided via CLI, override
     if args.exp_name:
-        candidate = os.path.join('checkpoints', args.exp_name, 'best_model.pth')
-        if not os.path.exists(candidate):
-            raise FileNotFoundError(f"Best model not found for experiment '{args.exp_name}' at: {candidate}")
-        args.ckpt_path = candidate
+        # 优先尝试 SWA，其次尝试 best_model
+        candidate_swa = os.path.join('checkpoints', args.exp_name, 'best_model_swa.pth')
+        candidate_best = os.path.join('checkpoints', args.exp_name, 'best_model.pth')
+        
+        if os.path.exists(candidate_swa):
+            print(f"Found SWA model, using: {candidate_swa}")
+            args.ckpt_path = candidate_swa
+        elif os.path.exists(candidate_best):
+            print(f"Found Best model, using: {candidate_best}")
+            args.ckpt_path = candidate_best
+        else:
+            raise FileNotFoundError(f"No model found for experiment '{args.exp_name}'")
 
     evaluate_model(args)

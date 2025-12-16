@@ -42,5 +42,13 @@ class Logger:
         for k, v in metrics_dict.items():
             self.writer.add_scalar(f"{mode}/{k}", v, step)
 
+    def log_image(self, tag, img_tensor, step):
+        """Log a single image or grid to TensorBoard."""
+        self.writer.add_image(tag, img_tensor, step)
+
+    def log_histogram(self, tag, values, step, bins=30):
+        """Log histogram for monitoring distribution (e.g., logits/probabilities)."""
+        self.writer.add_histogram(tag, values, step, bins=bins)
+
     def close(self):
         self.writer.close()

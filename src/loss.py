@@ -7,7 +7,10 @@ from torchmetrics.image import StructuralSimilarityIndexMeasure
 class SaliencyLoss(nn.Module):
     def __init__(self, cfg):
         super().__init__()
-        self.weights = cfg.loss_weights
+        # 默认权重采用 CC + KLD 的复合分布损失
+        default_weights = {"cc": 1.0, "kld": 1.0, "bce": 0.0, "ssim": 0.0}
+        self.weights = {**default_weights, **getattr(cfg, "loss_weights", {})}
+        self.eps = 1e-8
         # BCEWithLogitsLoss 自带 Sigmoid，数值更稳定
         self.bce = nn.BCEWithLogitsLoss()
         self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(cfg.device)
@@ -26,6 +29,17 @@ class SaliencyLoss(nn.Module):
         
         return numerator / (denominator + 1e-8)
 
+    def kld_loss(self, pred_probs, target):
+        """KLD 计算前进行 Sum 归一化，避免负值与数值爆炸"""
+        pred_norm = pred_probs / (pred_probs.sum(dim=(1, 2, 3), keepdim=True) + self.eps)
+        target_norm = target / (target.sum(dim=(1, 2, 3), keepdim=True) + self.eps)
+
+        pred_norm = pred_norm.clamp(min=self.eps)
+        target_norm = target_norm.clamp(min=self.eps)
+
+        kld = target_norm * (torch.log(target_norm) - torch.log(pred_norm))
+        return kld.sum(dim=(1, 2, 3))
+
     def forward(self, pred_logits, target):
         """
         pred_logits: 模型直接输出的 logits (未经过 sigmoid)
@@ -41,6 +55,12 @@ class SaliencyLoss(nn.Module):
             cc = self.cc_metric(pred_probs, target)
             loss_cc = (1.0 - cc).mean()
             total_loss += self.weights["cc"] * loss_cc
+
+        # 2+. 计算 KLD (需要概率图)，使用 Sum 归一化
+        if self.weights.get("kld", 0) > 0:
+            kld_batch = self.kld_loss(pred_probs, target)
+            loss_kld = kld_batch.mean()
+            total_loss += self.weights["kld"] * loss_kld
 
         # 3. 计算 BCE Loss (注意：这里用 logits)
         if self.weights.get("bce", 0) > 0:

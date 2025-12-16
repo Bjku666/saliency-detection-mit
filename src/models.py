@@ -15,6 +15,7 @@ def build_model(backbone_name):
     print(f"Building Model with backbone: {backbone_name}")
     
     # SMP 库会自动处理 CNN 和 Transformer 的差异
+    # 使用标准 Unet，保持 mit_b5 Transformer 编码器的全局感受野
     model = smp.Unet(
         encoder_name=backbone_name, 
         encoder_weights="imagenet",     
