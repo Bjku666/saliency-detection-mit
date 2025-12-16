@@ -5,7 +5,8 @@ import cv2
 import torch
 from torch.utils.data import Dataset, DataLoader
 from glob import glob
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import KFold
+import numpy as np
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
@@ -60,23 +61,39 @@ class SaliencyDataset(Dataset):
 def get_dataloaders(cfg):
     stimuli_dir = os.path.join(cfg.data_root, "Stimuli")
     all_image_paths = sorted(glob(os.path.join(stimuli_dir, "*", "*.jpg")))
-    
-    valid_images, valid_masks, categories = [], [], []
+
+    valid_images, valid_masks = [], []
     for img_path in all_image_paths:
         mask_path = img_path.replace("Stimuli", "FIXATIONMAPS")
         if os.path.exists(mask_path):
             valid_images.append(img_path)
             valid_masks.append(mask_path)
-            categories.append(os.path.basename(os.path.dirname(img_path)))
 
-    train_img, val_img, train_mask, val_mask = train_test_split(
-        valid_images, valid_masks, test_size=cfg.val_split, random_state=cfg.seed, stratify=categories
-    )
-    
+    if len(valid_images) == 0:
+        raise RuntimeError("No valid image-mask pairs found under data root. Please check dataset paths.")
+
+    indices = np.arange(len(valid_images))
+    kf = KFold(n_splits=cfg.k_folds, shuffle=True, random_state=42)
+
+    selected = None
+    for fold_idx, (train_idx, val_idx) in enumerate(kf.split(indices)):
+        if fold_idx == cfg.fold:
+            selected = (train_idx, val_idx)
+            break
+
+    if selected is None:
+        raise ValueError(f"Fold index {cfg.fold} is invalid for k={cfg.k_folds}")
+
+    train_idx, val_idx = selected
+    train_img = [valid_images[i] for i in train_idx]
+    train_mask = [valid_masks[i] for i in train_idx]
+    val_img = [valid_images[i] for i in val_idx]
+    val_mask = [valid_masks[i] for i in val_idx]
+
     train_ds = SaliencyDataset(train_img, train_mask, transform=build_transforms(cfg, 'train'))
     val_ds = SaliencyDataset(val_img, val_mask, transform=build_transforms(cfg, 'val'))
-    
+
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, pin_memory=True, drop_last=True)
     val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers, pin_memory=True)
-    
+
     return train_loader, val_loader

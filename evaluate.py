@@ -136,7 +136,8 @@ if __name__ == "__main__":
     group.add_argument('--ckpt_path', type=str, 
                         help="Path to the trained model checkpoint (.pth file).")
     group.add_argument('--exp_name', type=str,
-                        help="Experiment name under ./checkpoints")
+                        help="Experiment name under ./checkpoints (base name, without fold suffix)")
+    parser.add_argument('--fold', type=int, default=0, help='Fold index when using --exp_name')
     parser.add_argument('--list', action='store_true', help='List available experiments')
     
     args = parser.parse_args()
@@ -165,17 +166,41 @@ if __name__ == "__main__":
             raise ValueError('No checkpoint specified. Provide --ckpt_path or --exp_name')
 
     if args.exp_name:
-        # 优先尝试 SWA，其次尝试 best_model
-        candidate_swa = os.path.join('checkpoints', args.exp_name, 'best_model_swa.pth')
-        candidate_best = os.path.join('checkpoints', args.exp_name, 'best_model.pth')
-        
+        # 新结构：checkpoints/<exp_name>/foldX/{best_model_swa,best_model}.pth
+        base_dir = os.path.join('checkpoints', args.exp_name, f'fold{args.fold}')
+        candidate_swa = os.path.join(base_dir, 'best_model_swa.pth')
+        candidate_best = os.path.join(base_dir, 'best_model.pth')
+
+        # 兼容旧结构：checkpoints/<exp_name>_foldX/...
+        legacy_dir = os.path.join('checkpoints', f'{args.exp_name}_fold{args.fold}')
+        legacy_swa = os.path.join(legacy_dir, 'best_model_swa.pth')
+        legacy_best = os.path.join(legacy_dir, 'best_model.pth')
+
+        # 再兼容最老的单模型结构：checkpoints/<exp_name>/best_model.pth
+        oldest_swa = os.path.join('checkpoints', args.exp_name, 'best_model_swa.pth')
+        oldest_best = os.path.join('checkpoints', args.exp_name, 'best_model.pth')
+
         if os.path.exists(candidate_swa):
             print(f"Found SWA model, using: {candidate_swa}")
             args.ckpt_path = candidate_swa
         elif os.path.exists(candidate_best):
             print(f"Found Best model, using: {candidate_best}")
             args.ckpt_path = candidate_best
+        elif os.path.exists(legacy_swa):
+            print(f"Found legacy SWA model, using: {legacy_swa}")
+            args.ckpt_path = legacy_swa
+        elif os.path.exists(legacy_best):
+            print(f"Found legacy best model, using: {legacy_best}")
+            args.ckpt_path = legacy_best
+        elif os.path.exists(oldest_swa):
+            print(f"Found oldest SWA model, using: {oldest_swa}")
+            args.ckpt_path = oldest_swa
+        elif os.path.exists(oldest_best):
+            print(f"Found oldest best model, using: {oldest_best}")
+            args.ckpt_path = oldest_best
         else:
-            raise FileNotFoundError(f"No model found for experiment '{args.exp_name}'")
+            raise FileNotFoundError(
+                f"No model found for experiment '{args.exp_name}'. Tried: {base_dir}, {legacy_dir}, and checkpoints/{args.exp_name}/*.pth"
+            )
 
     evaluate_model(args)

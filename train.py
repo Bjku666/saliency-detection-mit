@@ -75,7 +75,7 @@ def main():
     cfg.device = device
     logger = Logger(cfg.log_dir)
     logger.info(f"Experiment Started: {cfg.exp_name}")
-    logger.info(f"Config: Backbone={cfg.backbone}, BS={cfg.batch_size}, LR={cfg.lr}")
+    logger.info(f"Config: Backbone={cfg.backbone}, BS={cfg.batch_size}, LR={cfg.lr}, Fold={cfg.fold}/{cfg.k_folds-1}")
     
     train_loader, val_loader = get_dataloaders(cfg)
     model = build_model(cfg.backbone).to(device)
