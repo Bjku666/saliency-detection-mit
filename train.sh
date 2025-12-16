@@ -20,13 +20,13 @@ echo "本次实验名(BASE_EXP_NAME)=$BASE_EXP_NAME"
 # --- GPU 0 任务队列 (跑 Fold 0, 1, 2) ---
 (
     echo "[GPU 0] 开始训练 Fold 0..."
-    CUDA_VISIBLE_DEVICES=0 python train.py --backbone $BACKBONE --fold 0 --batch_size $BATCH_SIZE --note $EXP_NOTE --exp_name $BASE_EXP_NAME
+    python train.py --backbone $BACKBONE --fold 0 --batch_size $BATCH_SIZE --note $EXP_NOTE --exp_name $BASE_EXP_NAME --gpu_id 0
     
     echo "[GPU 0] Fold 0 完成! 开始训练 Fold 1..."
-    CUDA_VISIBLE_DEVICES=0 python train.py --backbone $BACKBONE --fold 1 --batch_size $BATCH_SIZE --note $EXP_NOTE --exp_name $BASE_EXP_NAME
+    python train.py --backbone $BACKBONE --fold 1 --batch_size $BATCH_SIZE --note $EXP_NOTE --exp_name $BASE_EXP_NAME --gpu_id 0
     
     echo "[GPU 0] Fold 1 完成! 开始训练 Fold 2..."
-    CUDA_VISIBLE_DEVICES=0 python train.py --backbone $BACKBONE --fold 2 --batch_size $BATCH_SIZE --note $EXP_NOTE --exp_name $BASE_EXP_NAME
+    python train.py --backbone $BACKBONE --fold 2 --batch_size $BATCH_SIZE --note $EXP_NOTE --exp_name $BASE_EXP_NAME --gpu_id 0
     
     echo "[GPU 0] 所有任务完成！"
 ) > logs_gpu0.out 2>&1 &  # 后台运行，日志写入 logs_gpu0.out
@@ -34,10 +34,10 @@ echo "本次实验名(BASE_EXP_NAME)=$BASE_EXP_NAME"
 # --- GPU 1 任务队列 (跑 Fold 3, 4) ---
 (
     echo "[GPU 1] 开始训练 Fold 3..."
-    CUDA_VISIBLE_DEVICES=1 python train.py --backbone $BACKBONE --fold 3 --batch_size $BATCH_SIZE --note $EXP_NOTE --exp_name $BASE_EXP_NAME
+    python train.py --backbone $BACKBONE --fold 3 --batch_size $BATCH_SIZE --note $EXP_NOTE --exp_name $BASE_EXP_NAME --gpu_id 1
     
     echo "[GPU 1] Fold 3 完成! 开始训练 Fold 4..."
-    CUDA_VISIBLE_DEVICES=1 python train.py --backbone $BACKBONE --fold 4 --batch_size $BATCH_SIZE --note $EXP_NOTE --exp_name $BASE_EXP_NAME
+    python train.py --backbone $BACKBONE --fold 4 --batch_size $BATCH_SIZE --note $EXP_NOTE --exp_name $BASE_EXP_NAME --gpu_id 1
     
     echo "[GPU 1] 所有任务完成！"
 ) > logs_gpu1.out 2>&1 &  # 后台运行，日志写入 logs_gpu1.out

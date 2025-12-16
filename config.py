@@ -73,7 +73,8 @@ class Config:
         parser = argparse.ArgumentParser(description="Saliency Prediction Training")
         parser.add_argument('--backbone', type=str, default=self.backbone, choices=['mit_b5'])
         parser.add_argument('--batch_size', type=int, default=None)
-        parser.add_argument('--gpu_id', type=str, default="0")
+        # 如果不传 --gpu_id，则尊重外部已设置的 CUDA_VISIBLE_DEVICES（例如 bash 中显式指定）
+        parser.add_argument('--gpu_id', type=str, default=None, help='CUDA_VISIBLE_DEVICES value (e.g., "0" or "1"). If omitted, keep existing env')
         parser.add_argument('--note', type=str, default="", help='Add a suffix tag to experiment name')
         parser.add_argument('--fold', type=int, default=0, help='Fold index for K-Fold training')
         parser.add_argument('--exp_name', type=str, default=None, help='Fixed experiment name (shared across folds), do NOT include fold suffix')
@@ -90,7 +91,8 @@ class Config:
         self.weight_decay = preset['weight_decay']
         self.warmup_epochs = preset['warmup_epochs']
         
-        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_id
+        if args.gpu_id is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
         
         # 生成/固定本次 5-fold 共享的实验名（不包含 fold 后缀）
         if args.exp_name:
