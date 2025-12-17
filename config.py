@@ -41,18 +41,26 @@ class Config:
             "ssim": 0.5   # 结构对齐
         }
 
-        # --- 模型特定预设 ---
+    # --- 模型特定预设 ---
         self.model_presets = {
             "mit_b5": {
-                "batch_size":16,     # 4090上跑512x512的稳定值
-                "lr": 5e-5,          # Transformer 适合较小的学习率
+                "batch_size": 8,     
+                "lr": 5e-5,          
                 "weight_decay": 0.01,
-                "warmup_epochs": 3   # 启动时预热3个epoch
+                "warmup_epochs": 3   
+            },
+            
+            # 新增 TranSalNet 配置
+            "transalnet": {
+                "batch_size": 4,      # 显存杀手，4090 上建议设为 4 或 8
+                "lr": 1e-5,           # 已经预训练过，微调 LR 要非常小！
+                "weight_decay": 1e-4, # 降低正则化，保留预训练特征
+                "warmup_epochs": 0    # 不需要预热，直接微调
             }
         }
         
-        # --- 默认模型 ---
-        self.backbone = "mit_b5"
+        # --- 默认模型改为核武器 ---
+        self.backbone = "transalnet"
         
         # --- 占位符 ---
         self.base_exp_name = ""
