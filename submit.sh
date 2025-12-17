@@ -7,7 +7,7 @@
 #   checkpoints/<BASE_EXP_NAME>/fold1/best_model.pth
 #   ...
 # 例如：BASE_EXP_NAME="mit_b5_1216_2243" 或 "mit_b5_1216_2243_kfold"
-BASE_EXP_NAME="mit_b5_1217_1030_kfold"
+BASE_EXP_NAME="mit_b5_1217_1509_kfold"
 # =========================================
 
 echo "========================================"

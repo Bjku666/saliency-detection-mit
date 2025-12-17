@@ -16,6 +16,7 @@ data/
 logs/
 nohup_train.out
 train.out
+logs_gpu1.out
 tensorboard.log
 
 # 忽略生成的提交結果 (CSV通常是跑出來的，不需要版本控制)
