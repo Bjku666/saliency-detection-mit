@@ -1,37 +1,62 @@
 #!/bin/bash
 
-# --- 配置区 ---
-BACKBONE="mit_b5"
-BATCH_SIZE=8        # 单卡显存允许的最大BS (4090上mit_b5通常跑8没问题，不够就改4)
-EXP_NOTE="kfold"   # 可选备注；留空则不追加
+# ================= 配置区 =================
+# 1. 选择阶段: 1 = 初始训练 (Baseline), 2 = 伪标签微调 (Rank 1冲刺)
+STAGE=1
 
-# 默认使用 GPU 1（你的 4090 空闲卡）。
-# 如需临时改用其它卡：GPU_ID=0 bash train.sh
-GPU_ID="${GPU_ID:-1}"
+# 2. 基础参数
+BACKBONE="transalnet"  # 你的核武器
+BATCH_SIZE=4           # TranSalNet 比较大，4090 建议设 4，如果显存够可试 8
+GPU_ID="${GPU_ID:-0}"  # 默认使用 GPU 0
 
-# 关键：一次 5-fold 训练必须共享同一个 BASE_EXP_NAME（不包含 fold 后缀）
-# 例如：mit_b5_1216_2243 或 mit_b5_1216_2243_kfold
-BASE_EXP_NAME="${BACKBONE}_$(date +%m%d_%H%M)"
-if [ -n "$EXP_NOTE" ]; then
-    BASE_EXP_NAME="${BASE_EXP_NAME}_${EXP_NOTE}"
+# ================= 自动逻辑 =================
+
+# 根据阶段设置参数
+if [ "$STAGE" == "1" ]; then
+    echo ">>> [Stage 1] 启动 Baseline 训练 (无伪标签)..."
+    EXP_NOTE="kfold"
+    USE_PSEUDO=""  # 为空表示不开启
+elif [ "$STAGE" == "2" ]; then
+    echo ">>> [Stage 2] 启动 Pseudo Labeling 微调 (混合训练)..."
+    EXP_NOTE="kfold_PL"  # 加个后缀，区分实验结果
+    USE_PSEUDO="--use_pseudo" # 开启 config.py 里的开关
+else
+    echo "错误: STAGE 必须是 1 或 2"
+    exit 1
 fi
-# ----------------
 
-echo "开始 5-Fold 交叉验证训练..."
+# 生成本次实验名 (不含 fold 后缀)
+# 例如: transalnet_1217_1509_kfold (Stage 1)
+# 例如: transalnet_1217_1820_kfold_PL (Stage 2)
+BASE_EXP_NAME="${BACKBONE}_$(date +%m%d_%H%M)_${EXP_NOTE}"
+
+echo "----------------------------------------"
 echo "配置: Model=$BACKBONE, BS=$BATCH_SIZE"
-echo "本次实验名(BASE_EXP_NAME)=$BASE_EXP_NAME"
+echo "阶段: Stage $STAGE"
+echo "实验名(BASE_EXP_NAME): $BASE_EXP_NAME"
+echo "使用显卡: GPU $GPU_ID"
+echo "----------------------------------------"
 
-echo "使用单卡训练: GPU_ID=$GPU_ID"
-
-# --- 单 GPU 顺序任务队列 (跑 Fold 0-4) ---
+# --- 5-Fold 顺序训练循环 ---
 (
     for FOLD in 0 1 2 3 4; do
         echo "[GPU ${GPU_ID}] 开始训练 Fold ${FOLD}..."
-        python train.py --backbone $BACKBONE --fold ${FOLD} --batch_size $BATCH_SIZE --note $EXP_NOTE --exp_name $BASE_EXP_NAME --gpu_id ${GPU_ID}
+        
+        # 核心命令：增加了 $USE_PSEUDO 参数
+        python train.py \
+            --backbone $BACKBONE \
+            --fold ${FOLD} \
+            --batch_size $BATCH_SIZE \
+            --note $EXP_NOTE \
+            --exp_name $BASE_EXP_NAME \
+            --gpu_id ${GPU_ID} \
+            $USE_PSEUDO
+            
         echo "[GPU ${GPU_ID}] Fold ${FOLD} 完成!"
     done
-    echo "[GPU ${GPU_ID}] 所有任务完成！"
-) > "logs_gpu${GPU_ID}.out" 2>&1 &  # 后台运行，日志写入 logs_gpuX.out
+    echo "[GPU ${GPU_ID}] 所有任务完成！实验名: $BASE_EXP_NAME"
+) > "logs_gpu${GPU_ID}.out" 2>&1 &
 
-echo "单卡任务已启动！"
-echo "请使用 'tail -f logs_gpu${GPU_ID}.out' 查看训练进度"
+echo "任务已后台启动！"
+echo "查看日志: tail -f logs_gpu${GPU_ID}.out"
+echo " 重要: 训练完成后，请复制上面的 BASE_EXP_NAME 到 submit.sh 用于推理。"
