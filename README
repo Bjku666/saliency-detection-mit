@@ -18,21 +18,169 @@ nohup python train.py --backbone mit_b5 --gpu_id 0 > train_log.out 2>&1 &```
 
 当训练停止后（无论是跑完了所有 epochs 还是 early stopping 触发了），`checkpoints` 文件夹里就会生成一个 `best_model.pth`。现在我们来评估它的最终性能。
 
-**1. 找到权重路径**
-*   你的最佳权重路径应该类似：`./checkpoints/mit_b5_1205_2210/best_model.pth`。
-*   请用 `ls -R checkpoints` 命令找到这个**确切的路径**。
+# Saliency Detection (MIT-B5)
 
-**2. 运行评估命令**
+本仓库用于显著性预测（saliency prediction）训练/评测/推理，并生成比赛提交 CSV。
+
+核心特点：
+- 模型：基于 `segmentation_models_pytorch` 的 `Unet(encoder=mit_b5)`
+- 训练：支持 K-Fold（默认 5 折），每次训练 1 个 fold
+- 推理：支持多 fold 集成 + 测试时增强（TTA：原图/水平翻转）
+
+---
+
+## 1. 环境依赖
+
+建议使用 Python 3.9+，并安装常用深度学习依赖。
+
+必需/常用包（按脚本 import）：
+- `torch`, `torchvision`
+- `segmentation-models-pytorch`
+- `albumentations`, `albumentations[pytorch]`
+- `opencv-python`
+- `numpy`, `pandas`, `scikit-learn`, `tqdm`
+- `tensorboard`（可选，用于可视化）
+
+如果你使用 pip：
 ```bash
-python evaluate.py --backbone mit_b5 --ckpt_path ./checkpoints/mit_b5_1205_2210/best_model.pth
+pip install torch torchvision
+pip install segmentation-models-pytorch albumentations opencv-python numpy pandas scikit-learn tqdm tensorboard
+```
 
-Phase 3: 生成最终提交文件
-评估完分数，确认结果满意后，我们来生成符合比赛提交格式的 CSV 文件。
-1. 找到权重路径 (同上一步)
-确保你的权重路径是正确的。
-2. 运行生成命令
-code
-Bash
-python inference.py --backbone mit_b5 --ckpt_path ./checkpoints/mit_b5_1205_2210/best_model.pth
-这个命令的参数和 evaluate.py 完全一样。
-3. 你会得到什么
+---
+
+## 2. 数据目录结构
+
+默认数据路径在 [config.py](config.py) 里：
+- 训练集根目录：`./data/train`
+- 测试集根目录：`./data/test`
+
+目录需满足（类别文件夹名称可任意，但 Stimuli 与 FIXATIONMAPS 要一一对应）：
+```
+data/
+    train/
+        Stimuli/<Category>/*.jpg
+        FIXATIONMAPS/<Category>/*.jpg
+    test/
+        Stimuli/<Category>/*.{jpg,png,jpeg}
+        FIXATIONMAPS/<Category>/*.{jpg,png,jpeg}  (若提供则可算分)
+```
+
+说明：
+- 训练时以 `Stimuli` 为输入图像，以 `FIXATIONMAPS` 为监督标签（灰度图会归一化到 [0,1]）。
+- 评估脚本会在 `data/test/FIXATIONMAPS` 存在时计算 CC 分数；如果只做提交推理，是否存在 GT 不影响生成 CSV。
+
+---
+
+## 3. 训练
+
+训练入口：`train.py`（每次训练 1 个 fold）。
+
+### 3.1 单折训练（手动）
+
+```bash
+python train.py --backbone mit_b5 --fold 0 --gpu_id 0
+```
+
+常用参数：
+- `--fold 0..4`：选择第几折
+- `--gpu_id 0/1/...`：写入 `CUDA_VISIBLE_DEVICES`（不传则沿用你当前环境变量）
+- `--batch_size N`：覆盖默认 batch size
+- `--exp_name NAME`：固定实验名（强烈建议做 5 折时使用同一个 exp_name）
+- `--note TAG`：为自动生成的实验名追加后缀
+
+### 3.2 五折训练（脚本）
+
+仓库提供了 [train.sh](train.sh) 示例（双卡并行：GPU0 跑 fold0-2，GPU1 跑 fold3-4）：
+```bash
+bash train.sh
+```
+
+训练输出目录（新结构）：
+```
+logs/<exp_name>/fold{0..4}/...
+checkpoints/<exp_name>/fold{0..4}/best_model.pth
+checkpoints/<exp_name>/fold{0..4}/best_model_swa.pth   (若启用 SWA)
+```
+
+---
+
+## 4. 监控训练（TensorBoard）
+
+你可以直接启动：
+```bash
+tensorboard --logdir=./logs --port 6006 --bind_all
+```
+
+或使用 [monitor.sh](monitor.sh)（会先清理旧进程再后台启动）：
+```bash
+bash monitor.sh
+```
+
+---
+
+## 5. 本地评估（CC 分数）
+
+评估入口：`evaluate.py`。
+
+方式 A：直接指定权重文件：
+```bash
+python evaluate.py --backbone mit_b5 --ckpt_path checkpoints/<exp_name>/fold0/best_model.pth
+```
+
+方式 B：按实验名 + fold 自动找权重（支持新旧目录兼容）：
+```bash
+python evaluate.py --backbone mit_b5 --exp_name <exp_name> --fold 0
+```
+
+查看有哪些实验目录：
+```bash
+python evaluate.py --list
+```
+
+---
+
+## 6. 推理并生成提交 CSV
+
+推理入口：`inference.py`。
+
+它会：
+- 读取 `data/test/Stimuli` 下的所有图片
+- 对每张图做 TTA（原图 + 水平翻转）
+- 支持多 fold 集成（对每个 fold 模型求平均）
+- 输出到 `submissions/`，文件名默认 `submission_MMDD_HHMM.csv`
+
+### 6.1 单折推理
+
+```bash
+python inference.py --exp_name <exp_name> --folds "0" --model_file best_model.pth
+```
+
+### 6.2 五折融合推理（推荐用于最终提交）
+
+```bash
+python inference.py --exp_name <exp_name> --folds "0,1,2,3,4" --model_file best_model_swa.pth
+```
+
+### 6.3 一键交互式脚本
+
+你也可以直接用 [submit.sh](submit.sh)：
+```bash
+bash submit.sh
+```
+
+---
+
+## 7. 常见问题
+
+### 7.1 找不到图片/GT
+- 请确认 `data/train` 与 `data/test` 的 `Stimuli/`、`FIXATIONMAPS/` 目录存在。
+- 评估需要 `data/test/FIXATIONMAPS`；仅生成提交 CSV 不强制需要 GT。
+
+### 7.2 推理时报错 “Checkpoint not found for fold ...”
+- 你需要先把对应 fold 的训练跑完，并确保目录为：
+    `checkpoints/<exp_name>/foldX/best_model(.pth 或 _swa.pth)`
+- 做五折融合时，5 个 fold 的权重都必须存在。
+
+### 7.3 如何指定默认评估权重
+- 可直接修改 [config.py](config.py) 中的 `eval_ckpt_path` / `eval_exp_name`。
